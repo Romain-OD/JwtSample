@@ -5,6 +5,7 @@
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 // JWT Authentication Service
 public class JwtAuthService
@@ -45,5 +46,45 @@ public class JwtAuthService
         );
 
         return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    public (string accessToken, string refreshToken) GenerateTokens(string username)
+    {
+        var issuer = _issuer;
+        var audience = _audience;
+        var key = Encoding.UTF8.GetBytes(_secretKey);
+
+        // Generate access token
+        var tokenDescriptor = new SecurityTokenDescriptor
+        {
+            Subject = new ClaimsIdentity(new[]
+            {
+            new Claim(ClaimTypes.Name, username),
+            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+        }),
+            Expires = DateTime.UtcNow.AddMinutes(20), // 20-minute expiration
+            Issuer = issuer,
+            Audience = audience,
+            SigningCredentials = new SigningCredentials(
+                new SymmetricSecurityKey(key),
+                SecurityAlgorithms.HmacSha256Signature)
+        };
+
+        var tokenHandler = new JwtSecurityTokenHandler();
+        var token = tokenHandler.CreateToken(tokenDescriptor);
+        var accessToken = tokenHandler.WriteToken(token);
+
+        // Generate refresh token
+        var refreshToken = GenerateRefreshToken();
+
+        return (accessToken, refreshToken);
+    }
+
+    private string GenerateRefreshToken()
+    {
+        var randomNumber = new byte[32];
+        using var rng = RandomNumberGenerator.Create();
+        rng.GetBytes(randomNumber);
+        return Convert.ToBase64String(randomNumber);
     }
 }

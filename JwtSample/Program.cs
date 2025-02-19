@@ -3,7 +3,10 @@
 // System.IdentityModel.Tokens.Jwt
 
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using System.Data.Entity;
 using System.Security.Claims;
 using System.Text;
 
@@ -23,6 +26,7 @@ builder.Services.AddAuthentication(options =>
         ValidateAudience = true,
         ValidateLifetime = true,
         ValidateIssuerSigningKey = true,
+        ClockSkew = TimeSpan.Zero,
         ValidIssuer = builder.Configuration["Jwt:Issuer"],
         ValidAudience = builder.Configuration["Jwt:Audience"],
         IssuerSigningKey = new SymmetricSecurityKey(
@@ -33,6 +37,7 @@ builder.Services.AddAuthentication(options =>
 
 builder.Services.AddAuthorization();
 builder.Services.AddScoped<JwtAuthService>();
+builder.Services.AddScoped<AuthDbContext>();
 
 var app = builder.Build();
 
@@ -44,7 +49,7 @@ app.UseAuthorization();
 var authGroup = app.MapGroup("/api/auth");
 
 // Login endpoint
-authGroup.MapPost("/login", async (LoginRequest request, JwtAuthService jwtService) =>
+authGroup.MapPost("/login", async (LoginRequest request, JwtAuthService jwtService, AuthDbContext dbContext) =>
 {
     // In a real application, validate credentials here
     if (string.IsNullOrEmpty(request.Email) || string.IsNullOrEmpty(request.Password))
@@ -52,16 +57,85 @@ authGroup.MapPost("/login", async (LoginRequest request, JwtAuthService jwtServi
         return Results.BadRequest("Invalid credentials");
     }
 
-    var token = jwtService.GenerateToken(
-        "userId", // In real app, use actual user ID
-        request.Email,
-        new[] { "User" }
-    );
+    // Generate token pair
+    var (accessToken, refreshToken) = jwtService.GenerateTokens(request.Email);
 
-    return Results.Ok(new TokenResponse(token));
+    // Store refresh token in database
+    var refreshTokenEntity = new RefreshToken
+    {
+        Token = refreshToken,
+        Username = request.Email,
+        ExpiryDate = DateTime.UtcNow.AddDays(7),
+        IsRevoked = false,
+        IssuedAt = DateTime.UtcNow
+    };
+
+    dbContext.RefreshTokens.Add(refreshTokenEntity);
+    await dbContext.SaveChangesAsync();
+
+    return Results.Ok(new
+    {
+        AccessToken = accessToken,
+        RefreshToken = refreshToken,
+        ExpiresIn = 1200 // 20 minutes in seconds
+    });
 })
 .WithName("Login")
 .WithOpenApi();
+
+app.MapPost("/refresh-token", async (RefreshTokenRequest request, AuthDbContext dbContext, JwtAuthService jwtService) =>
+{
+    // Validate refresh token
+    var storedToken = await dbContext.RefreshTokens
+        .FirstOrDefaultAsync(rt => rt.Token == request.RefreshToken && !rt.IsRevoked);
+
+    if (storedToken == null || storedToken.ExpiryDate < DateTime.UtcNow)
+    {
+        return Results.Unauthorized();
+    }
+
+    // Generate new token pair
+    var (newAccessToken, newRefreshToken) = jwtService.GenerateTokens(storedToken.Username);
+
+    // Revoke old refresh token (optional rotation)
+    storedToken.IsRevoked = true;
+
+    // Store new refresh token
+    var refreshTokenEntity = new RefreshToken
+    {
+        Token = newRefreshToken,
+        Username = storedToken.Username,
+        ExpiryDate = DateTime.UtcNow.AddDays(7),
+        IsRevoked = false,
+        IssuedAt = DateTime.UtcNow
+    };
+
+    dbContext.RefreshTokens.Add(refreshTokenEntity);
+    await dbContext.SaveChangesAsync();
+
+    return Results.Ok(new
+    {
+        AccessToken = newAccessToken,
+        RefreshToken = newRefreshToken,
+        ExpiresIn = 1200 // 20 minutes in seconds
+    });
+});
+
+// Logout/revoke endpoint
+app.MapPost("/revoke", [Authorize] async (RefreshTokenRequest request, AuthDbContext dbContext) =>
+{
+    var storedToken = await dbContext.RefreshTokens
+        .FirstOrDefaultAsync(rt => rt.Token == request.RefreshToken);
+
+    if (storedToken != null)
+    {
+        storedToken.IsRevoked = true;
+        await dbContext.SaveChangesAsync();
+    }
+
+    return Results.Ok(new { Message = "Token successfully revoked" });
+});
+
 
 // Protected endpoint
 authGroup.MapGet("/protected", (ClaimsPrincipal user) =>

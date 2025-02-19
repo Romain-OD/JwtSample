@@ -1,4 +1,4 @@
-![Untitled diagram-2025-02-19-094006](https://github.com/user-attachments/assets/73275003-37b4-4920-a440-55c7d46ce850)# JWT Authentication Sample in .NET 9
+## JWT Authentication Sample in .NET 9
 
 This project demonstrates the implementation of JWT (JSON Web Token) authentication in a .NET 9 minimal API application. It provides a secure way to handle user authentication and protect API endpoints.
 
